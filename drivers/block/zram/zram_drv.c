@@ -1291,7 +1291,7 @@ static void comp_params_reset(struct zram *zram, u32 prio)
 	struct zcomp_params *params = &zram->params[prio];
 
 	vfree(params->dict);
-	params->level = ZCOMP_PARAM_NO_LEVEL;
+	params->level = ZCOMP_PARAM_NOT_SET;
 	params->dict_sz = 0;
 	params->dict = NULL;
 }
@@ -1323,7 +1323,7 @@ static ssize_t algorithm_params_store(struct device *dev,
 				      const char *buf,
 				      size_t len)
 {
-	s32 prio = ZRAM_PRIMARY_COMP, level = ZCOMP_PARAM_NO_LEVEL;
+	s32 prio = ZRAM_PRIMARY_COMP, level = ZCOMP_PARAM_NOT_SET;
 	char *args, *param, *val, *algo = NULL, *dict_path = NULL;
 	struct zram *zram = dev_to_zram(dev);
 	int ret;
