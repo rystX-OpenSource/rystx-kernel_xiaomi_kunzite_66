@@ -205,4 +205,6 @@ elif [ "${LOCALVERSION+set}" != "set" ]; then
 	scm_version="$(scm_version --short)"
 fi
 
-echo "${KERNELVERSION}${file_localversion}${config_localversion}${LOCALVERSION}${scm_version}"
+head_commit=$(git rev-parse --short=7 HEAD 2>/dev/null)
+[ -z "$head_commit" ] && head_commit="unknown"
+echo "${KERNELVERSION}${file_localversion}${config_localversion}${LOCALVERSION}/${head_commit}"
