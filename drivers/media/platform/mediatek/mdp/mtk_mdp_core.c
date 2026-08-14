@@ -291,11 +291,17 @@ static int mtk_mdp_probe(struct platform_device *pdev)
 	}
 
 	mdp->vpu_dev = vpu_get_plat_device(pdev);
+	if (!mdp->vpu_dev) {
+		dev_err(&pdev->dev, "Failed to get vpu device\n");
+		ret = -ENODEV;
+		goto err_vpu_get_dev;
+	}
+
 	ret = vpu_wdt_reg_handler(mdp->vpu_dev, mtk_mdp_reset_handler, mdp,
 				  VPU_RST_MDP);
 	if (ret) {
 		dev_err(&pdev->dev, "Failed to register reset handler\n");
-		goto err_wdt_reg;
+		goto err_reg_handler;
 	}
 
 	platform_set_drvdata(pdev, mdp);
@@ -303,25 +309,20 @@ static int mtk_mdp_probe(struct platform_device *pdev)
 	ret = vb2_dma_contig_set_max_seg_size(&pdev->dev, DMA_BIT_MASK(32));
 	if (ret) {
 		dev_err(&pdev->dev, "Failed to set vb2 dma mag seg size\n");
-		goto err_set_max_seg_size;
-	}
-
-	ret = component_master_add_with_match(dev, &mtk_mdp_com_ops, match);
-	if (ret) {
-		dev_err(dev, "Component master add failed\n");
-		goto err_component_master_add;
+		goto err_reg_handler;
 	}
 
 	dev_dbg(dev, "mdp-%d registered successfully\n", mdp->id);
 
 	return 0;
 
-err_component_master_add:
-	vb2_dma_contig_clear_max_seg_size(&pdev->dev);
+err_reg_handler:
+	platform_device_put(mdp->vpu_dev);
 
-err_set_max_seg_size:
+err_vpu_get_dev:
+	mtk_mdp_unregister_m2m_device(mdp);
 
-err_wdt_reg:
+err_m2m_register:
 	v4l2_device_unregister(&mdp->v4l2_dev);
 
 err_dev_register:
@@ -344,6 +345,8 @@ static void mtk_mdp_remove(struct platform_device *pdev)
 	component_master_del(&pdev->dev, &mtk_mdp_com_ops);
 
 	vb2_dma_contig_clear_max_seg_size(&pdev->dev);
+	platform_device_put(mdp->vpu_dev);
+	mtk_mdp_unregister_m2m_device(mdp);
 	v4l2_device_unregister(&mdp->v4l2_dev);
 
 	destroy_workqueue(mdp->wdt_wq);

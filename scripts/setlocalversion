@@ -54,7 +54,7 @@ try_tag() {
 scm_version()
 {
 	local short=false
-	local no_dirty=false
+	local no_dirty=true
 	local tag
 
 	while [ $# -gt 0 ];
@@ -113,7 +113,7 @@ scm_version()
 		# If only the short version is requested, don't bother
 		# running further git commands
 		if $short; then
-			echo "+"
+			# echo "+"
 			return
 		fi
 
@@ -205,4 +205,6 @@ elif [ "${LOCALVERSION+set}" != "set" ]; then
 	scm_version="$(scm_version --short)"
 fi
 
-echo "${KERNELVERSION}${file_localversion}${config_localversion}${LOCALVERSION}${scm_version}"
+head_commit=$(git rev-parse --short=7 HEAD 2>/dev/null)
+[ -z "$head_commit" ] && head_commit="unknown"
+echo "${KERNELVERSION}${file_localversion}${config_localversion}${LOCALVERSION}/${head_commit}"

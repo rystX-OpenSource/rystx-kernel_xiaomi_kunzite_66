@@ -41,6 +41,8 @@
 #define UVC_EXT_GPIO_UNIT		0x7ffe
 #define UVC_EXT_GPIO_UNIT_ID		0x100
 
+#define UVC_INVALID_ENTITY_ID          0xffff
+
 /* ------------------------------------------------------------------------
  * Driver specific constants.
  */
@@ -76,6 +78,7 @@
 #define UVC_QUIRK_NO_RESET_RESUME	0x00004000
 #define UVC_QUIRK_DISABLE_AUTOSUSPEND	0x00008000
 #define UVC_QUIRK_INVALID_DEVICE_SOF	0x00010000
+#define UVC_QUIRK_MJPEG_NO_EOF		0x00020000
 
 #define UVC_QUIRK_PRIVACY_DURING_STREAM	0x80000000
 
@@ -251,6 +254,7 @@ struct uvc_entity {
 			struct mutex event_mutex;
 			int last_event_val;
 			bool is_gpio_ready;
+			bool initialized;
 		} gpio;
 	};
 

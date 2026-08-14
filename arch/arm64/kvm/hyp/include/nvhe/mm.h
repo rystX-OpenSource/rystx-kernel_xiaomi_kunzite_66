@@ -19,7 +19,7 @@ void *hyp_fixmap_map(phys_addr_t phys);
 void hyp_fixmap_unmap(void);
 void *hyp_fixblock_map(phys_addr_t phys);
 void hyp_fixblock_unmap(void);
-void hyp_poison_page(phys_addr_t phys);
+void hyp_poison_page(phys_addr_t phys, size_t page_size);
 
 int hyp_create_idmap(u32 hyp_va_bits);
 int hyp_map_vectors(void);
@@ -35,6 +35,9 @@ int pkvm_alloc_private_va_range(size_t size, unsigned long *haddr);
 void pkvm_remove_mappings(void *from, void *to);
 phys_addr_t __pkvm_private_range_pa(void *va);
 int __hyp_allocator_map(unsigned long start, phys_addr_t phys);
+
+u64 hpool_get_free_pages(void);
+u64 hpool_get_min_free_pages(void);
 
 int __pkvm_map_module_page(u64 pfn, void *va, enum kvm_pgtable_prot prot, bool is_protected);
 void __pkvm_unmap_module_page(u64 pfn, void *va);

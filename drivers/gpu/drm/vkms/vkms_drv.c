@@ -309,10 +309,32 @@ static int __init vkms_init(void)
 	int ret;
 	struct platform_device *default_pdev = NULL;
 
-	ret = platform_driver_register(&vkms_platform_driver);
+	config = kmalloc(sizeof(*config), GFP_KERNEL);
+	if (!config)
+		return -ENOMEM;
+
+	config->cursor = enable_cursor;
+	config->writeback = enable_writeback;
+	config->overlay = enable_overlay;
+
+	ret = vkms_create(config);
 	if (ret) {
-		DRM_ERROR("Unable to register platform driver\n");
+		kfree(config);
 		return ret;
+	}
+
+	default_config = config;
+
+	return 0;
+}
+
+static void vkms_destroy(struct vkms_config *config)
+{
+	struct platform_device *pdev;
+
+	if (!config->dev) {
+		DRM_INFO("vkms_device is NULL.\n");
+		return;
 	}
 
 	if (enable_default_device) {
@@ -344,19 +366,11 @@ static int __init vkms_init(void)
 
 static void __exit vkms_exit(void)
 {
-	struct device *dev;
+	if (!default_config)
+		return;
 
-	vkms_unregister_configfs();
-
-	while ((dev = platform_find_device_by_driver(
-			NULL, &vkms_platform_driver.driver))) {
-		// platform_find_device_by_driver increments the refcount. Drop
-		// it so we don't leak memory.
-		put_device(dev);
-		platform_device_unregister(to_platform_device(dev));
-	}
-
-	platform_driver_unregister(&vkms_platform_driver);
+	vkms_destroy(default_config);
+	kfree(default_config);
 }
 
 module_init(vkms_init);

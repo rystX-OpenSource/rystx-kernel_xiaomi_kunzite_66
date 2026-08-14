@@ -119,12 +119,14 @@ ieee80211_chanctx_reserved_chanreq(struct ieee80211_local *local,
 
 	lockdep_assert_held(&local->chanctx_mtx);
 
-	if (WARN_ON(!req))
+	if (WARN_ON(!compat))
 		return NULL;
 
-	list_for_each_entry(link, &ctx->reserved_links, reserved_chanctx_list) {
-		req = ieee80211_chanreq_compatible(&link->reserved, req);
-		if (!req)
+	list_for_each_entry(link, &ctx->reserved_links,
+			    reserved_chanctx_list) {
+		compat = cfg80211_chandef_compatible(&link->reserved_chandef,
+						     compat);
+		if (!compat)
 			break;
 	}
 
@@ -1274,6 +1276,7 @@ ieee80211_link_use_reserved_reassign(struct ieee80211_link_data *link)
 		goto out;
 	}
 
+	link->radar_required = link->reserved_radar_required;
 	list_move(&link->assigned_chanctx_list, &new_ctx->assigned_links);
 	rcu_assign_pointer(link_conf->chanctx_conf, &new_ctx->conf);
 

@@ -289,7 +289,8 @@ struct apic {
 
 	u32	disable_esr		: 1,
 		dest_mode_logical	: 1,
-		x2apic_set_max_apicid	: 1;
+		x2apic_set_max_apicid	: 1,
+		nmi_to_offline_cpu	: 1;
 
 	u32	(*calc_dest_apicid)(unsigned int cpu);
 
@@ -537,6 +538,8 @@ extern u32 apic_default_calc_apicid(unsigned int cpu);
 extern u32 apic_flat_calc_apicid(unsigned int cpu);
 
 extern u32 default_cpu_present_to_apicid(int mps_cpu);
+
+void apic_send_nmi_to_offline_cpu(unsigned int cpu);
 
 #else /* CONFIG_X86_LOCAL_APIC */
 
