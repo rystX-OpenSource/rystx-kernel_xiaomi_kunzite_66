@@ -34,6 +34,7 @@
 #include <linux/cpuhotplug.h>
 #include <linux/part_stat.h>
 #include <linux/kernel_read_file.h>
+#include <linux/sysctl.h>
 
 #include "zram_drv.h"
 
@@ -57,6 +58,23 @@ static const struct block_device_operations zram_devops;
 static void zram_free_page(struct zram *zram, size_t index);
 static int zram_read_page(struct zram *zram, struct page *page, u32 index,
 			  struct bio *parent);
+
+#ifdef CONFIG_ZRAM_MULTI_COMP
+u8 __read_mostly sysctl_zram_recomp_immediate = 1;
+
+static struct ctl_table zram_sysctl_table[] = {
+	{
+		.procname	= "zram_recomp_immediate",
+		.data		= &sysctl_zram_recomp_immediate,
+		.maxlen		= sizeof(u8),
+		.mode		= 0644,
+		.proc_handler	= proc_dou8vec_minmax,
+		.extra1		= SYSCTL_ZERO,
+		.extra2		= SYSCTL_THREE,
+	},
+};
+static struct ctl_table_header *zram_sysctl_table_header;
+#endif //CONFIG_ZRAM_MULTI_COMP
 
 static int zram_slot_trylock(struct zram *zram, u32 index)
 {
@@ -1663,9 +1681,13 @@ static int zram_write_page(struct zram *zram, struct page *page, u32 index)
 	unsigned long handle = -ENOMEM;
 	unsigned int comp_len = 0;
 	void *src, *dst, *mem;
-	struct zcomp_strm *zstrm;
+	struct zcomp_strm *zstrm = NULL;
 	unsigned long element = 0;
 	enum zram_pageflags flags = 0;
+	u8 prio, prio_max = zram->num_active_comps;
+#ifdef CONFIG_ZRAM_MULTI_COMP
+	prio_max = min_t(u8, prio_max, sysctl_zram_recomp_immediate + 1);
+#endif //CONFIG_ZRAM_MULTI_COMP
 
 	mem = kmap_local_page(page);
 	if (page_same_filled(mem, &element)) {
@@ -1678,21 +1700,43 @@ static int zram_write_page(struct zram *zram, struct page *page, u32 index)
 	kunmap_local(mem);
 
 compress_again:
-	zstrm = zcomp_stream_get(zram->comps[ZRAM_PRIMARY_COMP]);
-	src = kmap_local_page(page);
-	ret = zcomp_compress(zram->comps[ZRAM_PRIMARY_COMP], zstrm,
-			     src, &comp_len);
-	kunmap_local(src);
+	for (prio = ZRAM_PRIMARY_COMP; prio < prio_max; prio++) {
+		if (!zram->comps[prio])
+			continue;
 
-	if (unlikely(ret)) {
-		zcomp_stream_put(zram->comps[ZRAM_PRIMARY_COMP]);
-		pr_err("Compression failed! err=%d\n", ret);
-		zs_free(zram->mem_pool, handle);
-		return ret;
+		zstrm = zcomp_stream_get(zram->comps[prio]);
+		src = kmap_local_page(page);
+		ret = zcomp_compress(zram->comps[prio], zstrm,
+				     src, &comp_len);
+		kunmap_local(src);
+
+		if (unlikely(ret)) {
+			zcomp_stream_put(zram->comps[prio]);
+			pr_err("Compression failed! err=%d\n", ret);
+			zs_free(zram->mem_pool, handle);
+			return ret;
+		}
+
+		if (comp_len < huge_class_size)
+			break;
+
+		zcomp_stream_put(zram->comps[prio]);
+		zstrm = NULL;
 	}
 
-	if (comp_len >= huge_class_size)
-		comp_len = PAGE_SIZE;
+	if (!zstrm) {
+		/*
+		 * None of the (attempted) compressors could shrink this page
+		 * below huge_class_size. Store it uncompressed, tagging it
+		 * ZRAM_INCOMPRESSIBLE only if every active compressor (not
+		 * just the "immediate" subset) was actually tried.
+		 */
+		if (prio >= zram->num_active_comps)
+			flags = ZRAM_INCOMPRESSIBLE;
+		prio--;
+ 		comp_len = PAGE_SIZE;
+		zstrm = zcomp_stream_get(zram->comps[prio]);
+	}
 	/*
 	 * handle allocation has 2 paths:
 	 * a) fast path is executed with preemption disabled (for
@@ -1714,7 +1758,7 @@ compress_again:
 				__GFP_MOVABLE |
 				__GFP_CMA);
 	if (IS_ERR_VALUE(handle)) {
-		zcomp_stream_put(zram->comps[ZRAM_PRIMARY_COMP]);
+		zcomp_stream_put(zram->comps[prio]);
 		atomic64_inc(&zram->stats.writestall);
 		handle = zs_malloc(zram->mem_pool, comp_len,
 				GFP_NOIO | __GFP_HIGHMEM |
@@ -1731,14 +1775,14 @@ compress_again:
 		 * zstrm buffer back. It is necessary that the dereferencing
 		 * of the zstrm variable below occurs correctly.
 		 */
-		zstrm = zcomp_stream_get(zram->comps[ZRAM_PRIMARY_COMP]);
+		zstrm = zcomp_stream_get(zram->comps[prio]);
 	}
 
 	alloced_pages = zs_get_total_pages(zram->mem_pool);
 	update_used_max(zram, alloced_pages);
 
 	if (zram->limit_pages && alloced_pages > zram->limit_pages) {
-		zcomp_stream_put(zram->comps[ZRAM_PRIMARY_COMP]);
+		zcomp_stream_put(zram->comps[prio]);
 		zs_free(zram->mem_pool, handle);
 		return -ENOMEM;
 	}
@@ -1752,7 +1796,7 @@ compress_again:
 	if (comp_len == PAGE_SIZE)
 		kunmap_local(src);
 
-	zcomp_stream_put(zram->comps[ZRAM_PRIMARY_COMP]);
+	zcomp_stream_put(zram->comps[prio]);
 	zs_unmap_object(zram->mem_pool, handle);
 	atomic64_add(comp_len, &zram->stats.compr_data_size);
 out:
@@ -1763,18 +1807,22 @@ out:
 	zram_slot_lock(zram, index);
 	zram_free_page(zram, index);
 
-	if (comp_len == PAGE_SIZE) {
-		zram_set_flag(zram, index, ZRAM_HUGE);
-		atomic64_inc(&zram->stats.huge_pages);
-		atomic64_inc(&zram->stats.huge_pages_since);
-	}
-
-	if (flags) {
-		zram_set_flag(zram, index, flags);
+	if (flags == ZRAM_SAME) {
+		zram_set_flag(zram, index, ZRAM_SAME);
 		zram_set_element(zram, index, element);
-	}  else {
+	} else {
+		if (comp_len == PAGE_SIZE) {
+			zram_set_flag(zram, index, ZRAM_HUGE);
+			atomic64_inc(&zram->stats.huge_pages);
+			atomic64_inc(&zram->stats.huge_pages_since);
+		}
+
+		if (flags == ZRAM_INCOMPRESSIBLE)
+			zram_set_flag(zram, index, ZRAM_INCOMPRESSIBLE);
+
 		zram_set_handle(zram, index, handle);
 		zram_set_obj_size(zram, index, comp_len);
+		zram_set_priority(zram, index, prio);
 	}
 	zram_slot_unlock(zram, index);
 
@@ -2799,6 +2847,15 @@ static int __init zram_init(void)
 		num_devices--;
 	}
 
+#ifdef CONFIG_ZRAM_MULTI_COMP
+#define ZRAM_IR_VERSION "1.2"
+#define ZRAM_IR_PROGNAME "ZRAM Immediate Recompression (ZRAM-IR)"
+#define ZRAM_IR_AUTHOR   "Masahito Suzuki"
+	printk(KERN_INFO "%s %s by %s\n",
+		ZRAM_IR_PROGNAME, ZRAM_IR_VERSION, ZRAM_IR_AUTHOR);
+	zram_sysctl_table_header = register_sysctl("vm", zram_sysctl_table);
+#endif //CONFIG_ZRAM_MULTI_COMP
+
 	return 0;
 
 out_error:
@@ -2808,6 +2865,9 @@ out_error:
 
 static void __exit zram_exit(void)
 {
+#ifdef CONFIG_ZRAM_MULTI_COMP
+	unregister_sysctl_table(zram_sysctl_table_header);
+#endif //CONFIG_ZRAM_MULTI_COMP
 	destroy_devices();
 }
 
