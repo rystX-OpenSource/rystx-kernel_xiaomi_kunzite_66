@@ -1239,7 +1239,7 @@ static int update_cpus_allowed(struct cpuset *cs, struct task_struct *p,
 {
 	int ret = -EINVAL;
 
-	trace_android_rvh_update_cpus_allowed(p, cs->cpus_requested, new_mask, &ret);
+	trace_android_rvh_update_cpus_allowed(p, cs, new_mask, &ret);
 	if (!ret)
 		return ret;
 

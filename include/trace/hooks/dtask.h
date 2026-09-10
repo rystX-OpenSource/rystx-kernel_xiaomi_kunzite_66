@@ -196,7 +196,7 @@ DECLARE_HOOK(android_vh_clear_curr_lazy,
 	TP_ARGS(tsk));
 
 DECLARE_HOOK(android_vh_lock_delay_schedule,
-	TP_PROTO(struct task_struct *prev, unsigned int sched_mode, bool *ext_slice),
+	TP_PROTO(struct task_struct *prev, int sched_mode, bool *ext_slice),
 	TP_ARGS(prev, sched_mode, ext_slice));
 
 DECLARE_HOOK(android_vh_lock_task_fork,

@@ -1037,6 +1037,15 @@ static inline void blk_flush_plug(struct blk_plug *plug, bool async)
 		__blk_flush_plug(plug, async);
 }
 
+/*
+ * android15-6.6 does not carry the block-layer plug timestamp tracking
+ * that feeds this in android16-6.12 (nothing sets PF_BLOCK_TS here), so
+ * this is a no-op until that lands.
+ */
+static inline void blk_plug_invalidate_ts(struct task_struct *tsk)
+{
+}
+
 int blkdev_issue_flush(struct block_device *bdev);
 long nr_blockdev_pages(void);
 #else /* CONFIG_BLOCK */
@@ -1057,6 +1066,15 @@ static inline void blk_finish_plug(struct blk_plug *plug)
 }
 
 static inline void blk_flush_plug(struct blk_plug *plug, bool async)
+{
+}
+
+/*
+ * android15-6.6 does not carry the block-layer plug timestamp tracking
+ * that feeds this in android16-6.12 (nothing sets PF_BLOCK_TS here), so
+ * this is a no-op until that lands.
+ */
+static inline void blk_plug_invalidate_ts(struct task_struct *tsk)
 {
 }
 

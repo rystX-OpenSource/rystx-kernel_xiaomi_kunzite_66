@@ -492,9 +492,9 @@ DEFINE_EVENT_SCHEDSTAT(sched_stat_template, sched_stat_blocked,
  */
 TRACE_EVENT(sched_blocked_reason,
 
-	TP_PROTO(struct task_struct *tsk),
+	TP_PROTO(struct task_struct *tsk, void *blocked_func),
 
-	TP_ARGS(tsk),
+	TP_ARGS(tsk, blocked_func),
 
 	TP_STRUCT__entry(
 		__field( pid_t,	pid	)
@@ -504,7 +504,7 @@ TRACE_EVENT(sched_blocked_reason,
 
 	TP_fast_assign(
 		__entry->pid	= tsk->pid;
-		__entry->caller = (void *)__get_wchan(tsk);
+		__entry->caller = blocked_func;
 		__entry->io_wait = tsk->in_iowait;
 	),
 
@@ -517,33 +517,30 @@ TRACE_EVENT(sched_blocked_reason,
  */
 DECLARE_EVENT_CLASS(sched_stat_runtime,
 
-	TP_PROTO(struct task_struct *tsk, u64 runtime, u64 vruntime),
+	TP_PROTO(struct task_struct *tsk, u64 runtime),
 
-	TP_ARGS(tsk, __perf_count(runtime), vruntime),
+	TP_ARGS(tsk, __perf_count(runtime)),
 
 	TP_STRUCT__entry(
 		__array( char,	comm,	TASK_COMM_LEN	)
 		__field( pid_t,	pid			)
 		__field( u64,	runtime			)
-		__field( u64,	vruntime			)
 	),
 
 	TP_fast_assign(
 		memcpy(__entry->comm, tsk->comm, TASK_COMM_LEN);
 		__entry->pid		= tsk->pid;
 		__entry->runtime	= runtime;
-		__entry->vruntime	= vruntime;
 	),
 
-	TP_printk("comm=%s pid=%d runtime=%Lu [ns] vruntime=%Lu [ns]",
+	TP_printk("comm=%s pid=%d runtime=%Lu [ns]",
 			__entry->comm, __entry->pid,
-			(unsigned long long)__entry->runtime,
-			(unsigned long long)__entry->vruntime)
+			(unsigned long long)__entry->runtime)
 );
 
 DEFINE_EVENT(sched_stat_runtime, sched_stat_runtime,
-	     TP_PROTO(struct task_struct *tsk, u64 runtime, u64 vruntime),
-	     TP_ARGS(tsk, runtime, vruntime));
+	     TP_PROTO(struct task_struct *tsk, u64 runtime),
+	     TP_ARGS(tsk, runtime));
 
 /*
  * Tracepoint for showing priority inheritance modifying a tasks
@@ -779,7 +776,7 @@ DECLARE_TRACE(pelt_dl_tp,
 	TP_PROTO(struct rq *rq),
 	TP_ARGS(rq));
 
-DECLARE_TRACE(pelt_thermal_tp,
+DECLARE_TRACE(pelt_hw_tp,
 	TP_PROTO(struct rq *rq),
 	TP_ARGS(rq));
 
@@ -810,6 +807,90 @@ DECLARE_TRACE(sched_util_est_se_tp,
 DECLARE_TRACE(sched_update_nr_running_tp,
 	TP_PROTO(struct rq *rq, int change),
 	TP_ARGS(rq, change));
+
+DECLARE_TRACE(sched_compute_energy_tp,
+	TP_PROTO(struct task_struct *p, int dst_cpu, unsigned long energy,
+		 unsigned long max_util, unsigned long busy_time),
+	TP_ARGS(p, dst_cpu, energy, max_util, busy_time));
+
+TRACE_EVENT(sched_pe_return_migration,
+
+	TP_PROTO(struct task_struct *task, int target_cpu),
+
+	TP_ARGS(task, target_cpu),
+
+	TP_STRUCT__entry(
+		__array(char,	comm,	TASK_COMM_LEN	)
+		__field(pid_t,	pid			)
+		__field(int,	prio			)
+		__field(int,	target_cpu		)
+	),
+
+	TP_fast_assign(
+		strscpy(__entry->comm, task->comm, TASK_COMM_LEN);
+		__entry->pid	= task->pid;
+		__entry->prio	= task->prio; /* XXX SCHED_DEADLINE */
+		__entry->target_cpu	= target_cpu;
+	),
+
+	TP_printk("task=%s pid=%d prio=%d target_cpu=%d",
+		  __entry->comm, __entry->pid, __entry->prio,
+		  __entry->target_cpu)
+);
+TRACE_EVENT(sched_start_task_selection,
+
+	TP_PROTO(struct task_struct *prev, int cpu, bool is_blocked),
+
+	TP_ARGS(prev, cpu, is_blocked),
+
+	TP_STRUCT__entry(
+		__array(char,	comm,	TASK_COMM_LEN	)
+		__field(pid_t,	pid			)
+		__field(int,	prio			)
+		__field(bool,	is_blocked		)
+	),
+
+	TP_fast_assign(
+		strscpy(__entry->comm, prev->comm, TASK_COMM_LEN);
+		__entry->pid		= prev->pid;
+		__entry->prio		= prev->prio; /* XXX SCHED_DEADLINE */
+		__entry->is_blocked	= is_blocked;
+	),
+
+	TP_printk("prev=%s pid=%d prio=%d is_blocked: %i",
+		  __entry->comm, __entry->pid, __entry->prio, __entry->is_blocked)
+);
+TRACE_EVENT(sched_finish_task_selection,
+
+	TP_PROTO(struct task_struct *donor, struct task_struct *next, int cpu),
+
+	TP_ARGS(donor, next, cpu),
+
+	TP_STRUCT__entry(
+		__array(char,	donor_comm,	TASK_COMM_LEN	)
+		__field(pid_t,	donor_pid			)
+		__field(int,	donor_prio			)
+		__array(char,	next_comm,	TASK_COMM_LEN	)
+		__field(pid_t,	next_pid			)
+		__field(int,	next_prio			)
+		__field(int,	cpu				)
+	),
+
+	TP_fast_assign(
+		strscpy(__entry->donor_comm, donor->comm, TASK_COMM_LEN);
+		__entry->donor_pid	= donor->pid;
+		__entry->donor_prio	= donor->prio; /* XXX SCHED_DEADLINE */
+		strscpy(__entry->next_comm, next->comm, TASK_COMM_LEN);
+		__entry->next_pid	= next->pid;
+		__entry->next_prio	= next->prio; /* XXX SCHED_DEADLINE */
+		__entry->cpu = cpu;
+	),
+
+	TP_printk("donor=%s pid=%d prio=%d next=%s pid=%d prio=%d cpu=%d",
+		  __entry->donor_comm, __entry->donor_pid, __entry->donor_prio,
+		  __entry->next_comm, __entry->next_pid, __entry->next_prio,
+		  __entry->cpu)
+);
 
 #endif /* _TRACE_SCHED_H */
 

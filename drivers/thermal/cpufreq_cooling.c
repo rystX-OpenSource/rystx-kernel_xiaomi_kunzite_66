@@ -493,7 +493,7 @@ static int cpufreq_set_cur_state(struct thermal_cooling_device *cdev,
 	if (ret >= 0) {
 		cpufreq_cdev->cpufreq_state = state;
 		cpus = cpufreq_cdev->policy->related_cpus;
-		arch_update_thermal_pressure(cpus, frequency);
+		arch_update_hw_pressure(cpus, frequency);
 		ret = 0;
 	}
 

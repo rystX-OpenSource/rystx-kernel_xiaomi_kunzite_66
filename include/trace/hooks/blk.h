@@ -52,6 +52,9 @@ DECLARE_HOOK(android_vh_bio_add_page_merge_bypass,
 	TP_PROTO(struct bio *bio, bool *skip),
 	TP_ARGS(bio, skip));
 
+DECLARE_RESTRICTED_HOOK(android_rvh_io_schedule_prepare,
+	TP_PROTO(void *ignored),
+	TP_ARGS(NULL), 1);
 #endif /* _TRACE_HOOK_BLK_H */
 /* This part must be outside protection */
 #include <trace/define_trace.h>

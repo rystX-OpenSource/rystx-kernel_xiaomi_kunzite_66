@@ -66,6 +66,7 @@ struct root_domain;
 struct rq;
 struct sched_attr;
 struct sched_param;
+struct sched_dl_entity;
 struct seq_file;
 struct sighand_struct;
 struct signal_struct;
@@ -141,8 +142,9 @@ struct user_event_mm;
  * Special states are those that do not use the normal wait-loop pattern. See
  * the comment with set_special_state().
  */
-#define is_special_task_state(state)				\
-	((state) & (__TASK_STOPPED | __TASK_TRACED | TASK_PARKED | TASK_DEAD))
+#define is_special_task_state(state)					\
+	((state) & (__TASK_STOPPED | __TASK_TRACED | TASK_PARKED |	\
+		    TASK_DEAD | TASK_WAKING | TASK_FROZEN))
 
 #ifdef CONFIG_DEBUG_ATOMIC_SLEEP
 # define debug_normal_state_change(state_value)				\
@@ -295,7 +297,7 @@ enum {
 	TASK_COMM_LEN = 16,
 };
 
-extern void scheduler_tick(void);
+extern void sched_tick(void);
 
 #define	MAX_SCHEDULE_TIMEOUT		LONG_MAX
 
@@ -315,7 +317,7 @@ extern int __must_check io_schedule_prepare(void);
 extern void io_schedule_finish(int token);
 extern long io_schedule_timeout(long timeout);
 extern void io_schedule(void);
-extern struct task_struct *pick_migrate_task(struct rq *rq);
+extern struct task_struct *pick_task(struct rq *rq);
 extern int select_fallback_rq(int cpu, struct task_struct *p);
 
 /**
@@ -374,6 +376,10 @@ enum uclamp_id {
 extern struct root_domain def_root_domain;
 extern struct mutex sched_domains_mutex;
 #endif
+
+struct sched_param {
+	int sched_priority;
+};
 
 struct sched_info {
 #ifdef CONFIG_SCHED_INFO
@@ -470,7 +476,6 @@ struct sched_avg {
 	unsigned long			runnable_avg;
 	unsigned long			util_avg;
 	unsigned int			util_est;
-	u32                             reserved;
 } ____cacheline_aligned;
 
 /*
@@ -501,7 +506,7 @@ struct sched_statistics {
 	u64				block_max;
 	s64				sum_block_runtime;
 
-	u64				exec_max;
+	s64				exec_max;
 	u64				slice_max;
 
 	u64				nr_migrations_cold;
@@ -532,15 +537,28 @@ struct sched_entity {
 	struct rb_node			run_node;
 	u64				deadline;
 	u64				min_vruntime;
+	u64				min_slice;
 
 	struct list_head		group_node;
-	unsigned int			on_rq;
+	unsigned char			on_rq;
+	unsigned char			sched_delayed;
+	unsigned char			rel_deadline;
+	unsigned char			custom_slice;
+					/* hole */
 
 	u64				exec_start;
 	u64				sum_exec_runtime;
 	u64				prev_sum_exec_runtime;
 	u64				vruntime;
-	s64				vlag;
+	union {
+		/*
+		 * When !@on_rq this field is vlag.
+		 * When cfs_rq->curr == se (which implies @on_rq)
+		 * this field is vprot. See protect_slice().
+		 */
+		s64                     vlag;
+		u64                     vprot;
+	};
 	u64				slice;
 
 	u64				nr_migrations;
@@ -595,6 +613,9 @@ struct sched_rt_entity {
 	ANDROID_KABI_RESERVE(4);
 } __randomize_layout;
 
+typedef bool (*dl_server_has_tasks_f)(struct sched_dl_entity *);
+typedef struct task_struct *(*dl_server_pick_f)(struct sched_dl_entity *);
+
 struct sched_dl_entity {
 	struct rb_node			rb_node;
 
@@ -637,11 +658,34 @@ struct sched_dl_entity {
 	 *
 	 * @dl_overrun tells if the task asked to be informed about runtime
 	 * overruns.
+	 *
+	 * @dl_server tells if this is a server entity.
+	 *
+	 * @dl_defer tells if this is a deferred or regular server. For
+	 * now only defer server exists.
+	 *
+	 * @dl_defer_armed tells if the deferrable server is waiting
+	 * for the replenishment timer to activate it.
+	 *
+	 * @dl_server_active tells if the dlserver is active(started).
+	 * dlserver is started on first cfs enqueue on an idle runqueue
+	 * and is stopped when a dequeue results in 0 cfs tasks on the
+	 * runqueue. In other words, dlserver is active only when cpu's
+	 * runqueue has atleast one cfs task.
+	 *
+	 * @dl_defer_running tells if the deferrable server is actually
+	 * running, skipping the defer phase.
 	 */
 	unsigned int			dl_throttled      : 1;
 	unsigned int			dl_yielded        : 1;
 	unsigned int			dl_non_contending : 1;
 	unsigned int			dl_overrun	  : 1;
+	unsigned int			dl_server         : 1;
+	unsigned int			dl_server_active  : 1;
+	unsigned int			dl_defer	  : 1;
+	unsigned int			dl_defer_armed	  : 1;
+	unsigned int			dl_defer_running  : 1;
+	unsigned int			dl_server_idle    : 1; //UNUSED but kept for KMI
 
 	/*
 	 * Bandwidth enforcement timer. Each -deadline task has its
@@ -657,6 +701,19 @@ struct sched_dl_entity {
 	 * time.
 	 */
 	struct hrtimer inactive_timer;
+
+	/*
+	 * Bits for DL-server functionality. Also see the comment near
+	 * dl_server_update().
+	 *
+	 * @rq the runqueue this server is for
+	 *
+	 * @server_has_tasks() returns true if @server_pick return a
+	 * runnable task.
+	 */
+	struct rq			*rq;
+	dl_server_has_tasks_f		server_has_tasks; //UNUSED, but preserved for KMI
+	dl_server_pick_f		server_pick_task;
 
 #ifdef CONFIG_RT_MUTEXES
 	/*
@@ -731,6 +788,12 @@ struct kmap_ctrl {
 #endif
 };
 
+enum blocked_on_state {
+	BO_RUNNABLE,
+	BO_BLOCKED,
+	BO_WAKING,
+};
+
 struct task_struct {
 #ifdef CONFIG_THREAD_INFO_IN_TASK
 	/*
@@ -783,6 +846,7 @@ struct task_struct {
 	struct sched_entity		se;
 	struct sched_rt_entity		rt;
 	struct sched_dl_entity		dl;
+	struct sched_dl_entity		*dl_server;
 	const struct sched_class	*sched_class;
 
 #ifdef CONFIG_SCHED_CORE
@@ -820,6 +884,7 @@ struct task_struct {
 #endif
 
 	unsigned int			policy;
+	unsigned long			max_allowed_capacity;
 	int				nr_cpus_allowed;
 	const cpumask_t			*cpus_ptr;
 	cpumask_t			*user_cpus_ptr;
@@ -880,6 +945,7 @@ struct task_struct {
 	unsigned			sched_reset_on_fork:1;
 	unsigned			sched_contributes_to_load:1;
 	unsigned			sched_migrated:1;
+	unsigned			sched_task_hot:1;
 
 	/* Force alignment to the next boundary: */
 	unsigned			:0;
@@ -900,6 +966,9 @@ struct task_struct {
 	 * ->sched_remote_wakeup gets used, so it can be in this word.
 	 */
 	unsigned			sched_remote_wakeup:1;
+#ifdef CONFIG_RT_MUTEXES
+	unsigned			sched_rt_mutex:1;
+#endif
 
 	/* Bit to tell LSMs we're in execve(): */
 	unsigned			in_execve:1;
@@ -1139,9 +1208,21 @@ struct task_struct {
 	struct rt_mutex_waiter		*pi_blocked_on;
 #endif
 
-#ifdef CONFIG_DEBUG_MUTEXES
-	/* Mutex deadlock detection: */
-	struct mutex_waiter		*blocked_on;
+	enum blocked_on_state		blocked_on_state;
+	struct mutex			*blocked_on;	/* lock we're blocked on */
+	struct task_struct		*blocked_donor;	/* task that is boosting this task */
+	struct list_head		migration_node;
+#ifdef CONFIG_SCHED_PROXY_EXEC
+	struct list_head		blocked_head;  /* tasks blocked on this task */
+	struct list_head		blocked_node;  /* our entry on someone elses blocked_head */
+	/* Node for list of tasks to process blocked_head list for blocked entitiy activations */
+	struct list_head		blocked_activation_node;
+	struct task_struct		*sleeping_owner; /* task our blocked_node is enqueued on */
+#endif
+	raw_spinlock_t			blocked_lock;
+
+#ifdef CONFIG_DETECT_HUNG_TASK_BLOCKER
+	struct mutex			*blocker_mutex;
 #endif
 
 #ifdef CONFIG_DEBUG_ATOMIC_SLEEP
@@ -1562,6 +1643,19 @@ struct task_struct {
 	 */
 };
 
+#ifdef CONFIG_SCHED_PROXY_EXEC
+DECLARE_STATIC_KEY_FALSE(__sched_proxy_exec);
+static inline bool sched_proxy_exec(void)
+{
+	return static_branch_likely(&__sched_proxy_exec);
+}
+#else
+static inline bool sched_proxy_exec(void)
+{
+	return false;
+}
+#endif
+
 static inline struct pid *task_pid(struct task_struct *task)
 {
 	return task->thread_pid;
@@ -1763,7 +1857,7 @@ extern struct pid *cad_pid;
 #define PF_NO_SETAFFINITY	0x04000000	/* Userland is not allowed to meddle with cpus_mask */
 #define PF_MCE_EARLY		0x08000000      /* Early kill for mce process policy */
 #define PF_MEMALLOC_PIN		0x10000000	/* Allocation context constrained to zones which allow long term pinning. */
-#define PF__HOLE__20000000	0x20000000
+#define PF_BLOCK_TS		0x20000000	/* plug has ts that needs updating */
 #define PF__HOLE__40000000	0x40000000
 #define PF_SUSPEND_TASK		0x80000000      /* This thread called freeze_processes() and should not be frozen */
 
@@ -2184,6 +2278,104 @@ extern int __cond_resched_rwlock_write(rwlock_t *lock);
 	__cond_resched_rwlock_write(lock);					\
 })
 
+#ifndef CONFIG_PREEMPT_RT
+
+/*
+ * With proxy exec, if a task has been proxy-migrated, it may be a donor
+ * on a cpu that it can't actually run on. Thus we need a special state
+ * to denote that the task is being woken, but that it needs to be
+ * evaluated for return-migration before it is run. So if the task is
+ * blocked_on PROXY_WAKING, return migrate it before running it.
+ */
+#define PROXY_WAKING ((struct mutex *)(-1L))
+
+static inline struct mutex *__get_task_blocked_on(struct task_struct *p)
+{
+	lockdep_assert_held_once(&p->blocked_lock);
+	return p->blocked_on == PROXY_WAKING ? NULL : p->blocked_on;
+}
+
+static inline void __set_task_blocked_on(struct task_struct *p, struct mutex *m)
+{
+	WARN_ON_ONCE(!m);
+	/* The task should only be setting itself as blocked */
+	WARN_ON_ONCE(p != current);
+	/* Currently we serialize blocked_on under the task::blocked_lock */
+	lockdep_assert_held_once(&p->blocked_lock);
+	/*
+	 * Check ensure we don't overwrite existing mutex value
+	 * with a different mutex. Note, setting it to the same
+	 * lock repeatedly is ok.
+	 */
+	WARN_ON_ONCE(p->blocked_on && p->blocked_on != m);
+	p->blocked_on = m;
+}
+
+static inline void __clear_task_blocked_on(struct task_struct *p, struct mutex *m)
+{
+	/* Currently we serialize blocked_on under the task::blocked_lock */
+	lockdep_assert_held_once(&p->blocked_lock);
+	/*
+	 * There may be cases where we re-clear already cleared
+	 * blocked_on relationships, but make sure we are not
+	 * clearing the relationship with a different lock.
+	 */
+	WARN_ON_ONCE(m && p->blocked_on && p->blocked_on != m && p->blocked_on != PROXY_WAKING);
+	p->blocked_on = NULL;
+}
+
+static inline void clear_task_blocked_on(struct task_struct *p, struct mutex *m)
+{
+	guard(raw_spinlock_irqsave)(&p->blocked_lock);
+	__clear_task_blocked_on(p, m);
+}
+
+static inline void __set_task_blocked_on_waking(struct task_struct *p, struct mutex *m)
+{
+	/* Currently we serialize blocked_on under the task::blocked_lock */
+	lockdep_assert_held_once(&p->blocked_lock);
+
+	if (!sched_proxy_exec()) {
+		__clear_task_blocked_on(p, m);
+		return;
+	}
+
+	/* Don't set PROXY_WAKING if blocked_on was already cleared */
+	if (!p->blocked_on)
+		return;
+	/*
+	 * There may be cases where we set PROXY_WAKING on tasks that were
+	 * already set to waking, but make sure we are not changing
+	 * the relationship with a different lock.
+	 */
+	WARN_ON_ONCE(m && p->blocked_on != m && p->blocked_on != PROXY_WAKING);
+	p->blocked_on = PROXY_WAKING;
+}
+
+static inline void set_task_blocked_on_waking(struct task_struct *p, struct mutex *m)
+{
+	guard(raw_spinlock_irqsave)(&p->blocked_lock);
+	__set_task_blocked_on_waking(p, m);
+}
+
+#else
+static inline void __clear_task_blocked_on(struct task_struct *p, struct rt_mutex *m)
+{
+}
+
+static inline void clear_task_blocked_on(struct task_struct *p, struct rt_mutex *m)
+{
+}
+
+static inline void __set_task_blocked_on_waking(struct task_struct *p, struct rt_mutex *m)
+{
+}
+
+static inline void set_task_blocked_on_waking(struct task_struct *p, struct rt_mutex *m)
+{
+}
+#endif /* !CONFIG_PREEMPT_RT */
+
 static inline void cond_resched_rcu(void)
 {
 #if defined(CONFIG_DEBUG_ATOMIC_SLEEP) || !defined(CONFIG_PREEMPT_RCU)
@@ -2294,6 +2486,11 @@ static inline void set_task_cpu(struct task_struct *p, unsigned int cpu)
 }
 
 #endif /* CONFIG_SMP */
+
+static inline bool task_is_runnable(struct task_struct *p)
+{
+	return p->on_rq && !p->se.sched_delayed;
+}
 
 extern bool sched_task_on_rq(struct task_struct *p);
 extern unsigned long get_wchan(struct task_struct *p);

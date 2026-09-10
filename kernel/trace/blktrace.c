@@ -24,6 +24,7 @@
 
 #include <trace/events/block.h>
 #include <trace/hooks/blk.h>
+EXPORT_TRACEPOINT_SYMBOL_GPL(android_rvh_io_schedule_prepare);
 
 #include "trace_output.h"
 

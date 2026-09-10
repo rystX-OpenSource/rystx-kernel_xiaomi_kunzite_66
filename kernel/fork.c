@@ -1418,7 +1418,7 @@ void mmput(struct mm_struct *mm)
 	might_sleep();
 
 	if (atomic_dec_and_test(&mm->mm_users)) {
-		trace_android_vh_mmput(NULL);
+		trace_android_vh_mmput(mm);
 		trace_android_vh_mmput_mm(mm);
 		__mmput(mm);
 	}
@@ -2671,7 +2671,8 @@ __latent_entropy struct task_struct *copy_process(
 	 * cgroup specific, it unconditionally needs to place the task on a
 	 * runqueue.
 	 */
-	sched_cgroup_fork(p, args);
+	if (sched_cgroup_fork(p, args))
+		goto bad_fork_cancel_cgroup;
 
 	/*
 	 * From this point on we must avoid any synchronous user-space

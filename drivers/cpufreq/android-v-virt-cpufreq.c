@@ -163,7 +163,7 @@ static int android_v_cpufreq_verify(struct cpufreq_policy_data *data)
 	 * upstream, this won't be needed in future/newer kernels as cpufreq
 	 * pressure will be applied automatically.
 	 */
-	arch_update_thermal_pressure(policy->related_cpus, data->max);
+	arch_update_hw_pressure(policy->related_cpus, data->max);
 	cpufreq_cpu_put(policy);
 
 	ret = cpufreq_frequency_table_verify(data, policy->freq_table);
