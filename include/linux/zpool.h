@@ -78,6 +78,7 @@ struct zpool_driver {
 			  void *handle_mem, size_t mem_len);
 	
 	u64 (*total_size)(void *pool);
+};
 
 bool zpool_can_sleep_mapped(struct zpool *pool);
 
