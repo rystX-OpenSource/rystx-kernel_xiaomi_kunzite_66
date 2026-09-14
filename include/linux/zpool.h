@@ -48,8 +48,6 @@ u64 zpool_get_total_size(struct zpool *pool);
  * @malloc:	allocate mem from a pool.
  * @free:	free mem from a pool.
  * @sleep_mapped: whether zpool driver can sleep during map.
- * @map:	map a handle.
- * @unmap:	unmap a handle.
  * @total_size:	get total size of a pool.
  *
  * This is created by a zpool implementation and registered
@@ -78,7 +76,10 @@ struct zpool_driver {
 			  void *handle_mem, size_t mem_len);
 	
 	u64 (*total_size)(void *pool);
+};
 
-bool zpool_can_sleep_mapped(struct zpool *pool);
+void zpool_register_driver(struct zpool_driver *driver);
+
+int zpool_unregister_driver(struct zpool_driver *driver);
 
 #endif
