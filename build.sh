@@ -1,5 +1,6 @@
 #!/bin/bash
 set -e
+set -o pipefail
 
 # Configuration
 DIR=$(readlink -f .)
@@ -11,6 +12,58 @@ OUT_DIR="$KERNEL_DIR/out"
 ZIMAGE_DIR="$OUT_DIR/arch/arm64/boot"
 DTB_DTBO_DIR="$ZIMAGE_DIR/dts/vendor/qcom"
 BUILD_START=$(date +"%s")
+
+# Logging configuration
+TIME=$(date "+%Y%m%d-%H%M%S")
+LOG_DIR="$KERNEL_DIR/build_logs"
+LOG_FILE="$LOG_DIR/build-$TIME.log"
+LOGS_TO_KEEP=10   # set to 0 to keep everything
+
+# Telegram configuration
+TOKEN="${TELEGRAM_BOT_TOKEN}"
+CHATID="${TELEGRAM_CHAT_ID}"
+BOT_MSG_URL="https://api.telegram.org/bot$TOKEN/sendMessage"
+BOT_BUILD_URL="https://api.telegram.org/bot$TOKEN/sendDocument"
+
+mkdir -p "$LOG_DIR"
+
+# Mirror everything (stdout+stderr) to the log file as well as the terminal
+exec > >(tee -a "$LOG_FILE") 2>&1
+
+echo "=========================================="
+echo "Build log: $LOG_FILE"
+echo "Started:   $(date)"
+echo "=========================================="
+
+# Send a text message to Telegram
+tg_post_msg() {
+    if [ -z "$TOKEN" ] || [ -z "$CHATID" ]; then
+        return 0
+    fi
+    curl -s -H "Content-Type: application/x-www-form-urlencoded" -X POST "$BOT_MSG_URL" \
+        -d chat_id="$CHATID" \
+        -d "disable_web_page_preview=true" \
+        -d "parse_mode=html" \
+        -d text="$1" >/dev/null
+}
+
+# Send a file (e.g. the zip or the log) to Telegram
+tg_post_build() {
+    if [ -z "$TOKEN" ] || [ -z "$CHATID" ]; then
+        return 0
+    fi
+    local MD5CHECK
+    MD5CHECK=$(md5sum "$1" | cut -d' ' -f1)
+    curl --progress-bar -F document=@"$1" "$BOT_BUILD_URL" \
+        -F chat_id="$CHATID" \
+        -F "disable_web_page_preview=true" \
+        -F "parse_mode=Markdown" \
+        -F caption="$2 | *MD5 Checksum : *\`$MD5CHECK\`" >/dev/null
+}
+
+tg_post_msg "<b>Kernel build started</b>%0A<b>Date:</b> <code>$(date)</code>"
+
+sudo apt install libelf-dev -y
 
 # Function to check for existing Clang
 check_clang() {
@@ -59,16 +112,37 @@ export ARCH=arm64
 export SUBARCH=arm64
 export CROSS_COMPILE=aarch64-linux-gnu-
 
+# Trap failures so we know where to look for the log, and where the build stopped
+on_error() {
+    local exit_code=$?
+    echo -e "\n=========================================="
+    echo "Build FAILED (exit code $exit_code)"
+    echo "See full log: $LOG_FILE"
+    echo "=========================================="
+    tg_post_build "$LOG_FILE" "Build failed (exit code $exit_code)"
+    exit "$exit_code"
+}
+trap on_error ERR
+
 # Build kernel
-make O="$OUT_DIR" CC=clang LLVM=1 LLVM_IAS=1 KCFLAGS="-w" $KERNEL_DEFCONFIG || exit 1
-make -j17 O="$OUT_DIR" CC=clang LLVM=1 LLVM_IAS=1 KCFLAGS="-w" || exit 1
+echo -e "\n--- Cleaning source tree ---"
+make ARCH=arm64 CC=clang LLVM=1 LLVM_IAS=1 mrproper
+rm -rf "$OUT_DIR"
+
+echo -e "\n--- Generating defconfig ---"
+make O="$OUT_DIR" CC=clang LLVM=1 LLVM_IAS=1 KCFLAGS="-w" $KERNEL_DEFCONFIG
+
+echo -e "\n--- Compiling kernel ---"
+make -kj"$(nproc --all)" O="$OUT_DIR" CC=clang LLVM=1 LLVM_IAS=1 KCFLAGS="-w"
+
+# Build succeeded past this point, so remove the trap
+trap - ERR
 
 # Clean up old kernel zip files
 echo "Cleaning up old kernel zip files..."
 find "$KERNEL_DIR" -maxdepth 1 -type f -name "Raccoon-66-*.zip" -exec rm -v {} \;
 
 # Create temporary anykernel directory
-TIME=$(date "+%Y%m%d-%H%M%S")
 TEMP_ANY_KERNEL_DIR="$KERNEL_DIR/anykernel_temp"
 rm -rf "$TEMP_ANY_KERNEL_DIR"
 
@@ -100,10 +174,19 @@ cd ..
 # Clean up temporary directory
 rm -rf "$TEMP_ANY_KERNEL_DIR"
 
+# Trim old logs, keeping only the most recent LOGS_TO_KEEP
+if [ "$LOGS_TO_KEEP" -gt 0 ]; then
+    ls -1t "$LOG_DIR"/build-*.log 2>/dev/null | tail -n +"$((LOGS_TO_KEEP + 1))" | xargs -r rm -v
+fi
+
 BUILD_END=$(date +"%s")
 DIFF=$((BUILD_END - BUILD_START))
 echo -e "\n=========================================="
 echo "Build completed in $((DIFF / 60))m $((DIFF % 60))s"
 echo "Final zip: $KERNEL_DIR/$ZIP_NAME"
 echo "Zip size: $(du -h "$KERNEL_DIR/$ZIP_NAME" | cut -f1)"
+echo "Build log: $LOG_FILE"
 echo "=========================================="
+
+tg_post_build "$KERNEL_DIR/$ZIP_NAME" "Build took $((DIFF / 60))m $((DIFF % 60))s"
+tg_post_build "$LOG_FILE" "Compile log"
