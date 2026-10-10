@@ -1122,6 +1122,206 @@ unsigned long zs_get_total_pages(struct zs_pool *pool)
 }
 EXPORT_SYMBOL_GPL(zs_get_total_pages);
 
+/*
+ * ANDROID / GKI KMI compatibility shim.
+ *
+ * Mainline commit 242f1af248a5 ("mm: zsmalloc: remove object mapping APIs
+ * and per-CPU map areas") deleted zs_map_object()/zs_unmap_object(), the
+ * enum zs_mapmode and the per-CPU mapping areas, replacing them with the
+ * zs_obj_read_begin()/zs_obj_read_end()/zs_obj_write() helpers above.
+ *
+ * Those exports are part of the android15-6.6 KMI (they are on the pixel,
+ * amlogic and exynos symbol lists), so pre-backport vendor modules import
+ * them. We keep them, with their original signatures and CRCs, implemented
+ * on top of the new zspage locking. The per-CPU copy buffer is retained for
+ * objects that span two pages, exactly as before, so the semantics vendor
+ * modules observe are unchanged.
+ */
+struct mapping_area {
+	local_lock_t lock;
+	char *vm_buf; /* copy buffer for objects that span pages */
+	char *vm_addr; /* address of kmap_atomic()'ed pages */
+	enum zs_mapmode vm_mm; /* mapping mode */
+};
+
+static DEFINE_PER_CPU(struct mapping_area, zs_map_area) = {
+	.lock	= INIT_LOCAL_LOCK(lock),
+};
+
+static int zs_cpu_prepare(unsigned int cpu)
+{
+	struct mapping_area *area = &per_cpu(zs_map_area, cpu);
+
+	/*
+	 * Make sure we don't leak memory if a cpu UP notification
+	 * and zs_init() race and both call zs_cpu_up() on the same cpu
+	 */
+	if (area->vm_buf)
+		return 0;
+	area->vm_buf = kmalloc(ZS_MAX_ALLOC_SIZE, GFP_KERNEL);
+	if (!area->vm_buf)
+		return -ENOMEM;
+	return 0;
+}
+
+static int zs_cpu_dead(unsigned int cpu)
+{
+	struct mapping_area *area = &per_cpu(zs_map_area, cpu);
+
+	kfree(area->vm_buf);
+	area->vm_buf = NULL;
+	return 0;
+}
+
+static void *__zs_map_object(struct mapping_area *area,
+			struct page *pages[2], int off, int size)
+{
+	int sizes[2];
+	void *addr;
+	char *buf = area->vm_buf;
+
+	/* disable page faults to match kmap_atomic() return conditions */
+	pagefault_disable();
+
+	/* no read fastpath */
+	if (area->vm_mm == ZS_MM_WO)
+		goto out;
+
+	sizes[0] = PAGE_SIZE - off;
+	sizes[1] = size - sizes[0];
+
+	/* copy object to per-cpu buffer */
+	addr = kmap_atomic(pages[0]);
+	memcpy(buf, addr + off, sizes[0]);
+	kunmap_atomic(addr);
+	addr = kmap_atomic(pages[1]);
+	memcpy(buf + sizes[0], addr, sizes[1]);
+	kunmap_atomic(addr);
+out:
+	return area->vm_buf;
+}
+
+static void __zs_unmap_object(struct mapping_area *area,
+			struct page *pages[2], int off, int size)
+{
+	int sizes[2];
+	void *addr;
+	char *buf;
+
+	/* no write fastpath */
+	if (area->vm_mm == ZS_MM_RO)
+		goto out;
+
+	buf = area->vm_buf;
+	buf = buf + ZS_HANDLE_SIZE;
+	size -= ZS_HANDLE_SIZE;
+	off += ZS_HANDLE_SIZE;
+
+	sizes[0] = PAGE_SIZE - off;
+	sizes[1] = size - sizes[0];
+
+	/* copy per-cpu buffer to object */
+	addr = kmap_atomic(pages[0]);
+	memcpy(addr + off, buf, sizes[0]);
+	kunmap_atomic(addr);
+	addr = kmap_atomic(pages[1]);
+	memcpy(addr, buf + sizes[0], sizes[1]);
+	kunmap_atomic(addr);
+
+out:
+	/* enable page faults to match kunmap_atomic() return conditions */
+	pagefault_enable();
+}
+
+void *zs_map_object(struct zs_pool *pool, unsigned long handle,
+			enum zs_mapmode mm)
+{
+	struct zspage *zspage;
+	struct page *page;
+	unsigned long obj, off;
+	unsigned int obj_idx;
+
+	struct size_class *class;
+	struct mapping_area *area;
+	struct page *pages[2];
+	void *ret;
+
+	/* It guarantees it can get zspage from handle safely */
+	read_lock(&pool->lock);
+	obj = handle_to_obj(handle);
+	obj_to_location(obj, &page, &obj_idx);
+	zspage = get_zspage(page);
+
+	/*
+	 * migration cannot move any zpages in this zspage. Here, zspage lock
+	 * is held instead of pool->lock, matching the newer per-zspage
+	 * migration locking, since callers may take some time until they
+	 * call zs_unmap_object().
+	 */
+	zspage_read_lock(zspage);
+	read_unlock(&pool->lock);
+
+	class = zspage_class(pool, zspage);
+	off = offset_in_page(class->size * obj_idx);
+
+	local_lock(&zs_map_area.lock);
+	area = this_cpu_ptr(&zs_map_area);
+	area->vm_mm = mm;
+	if (off + class->size <= PAGE_SIZE) {
+		/* this object is contained entirely within a page */
+		area->vm_addr = kmap_atomic(page);
+		ret = area->vm_addr + off;
+		goto out;
+	}
+
+	/* this object spans two pages */
+	pages[0] = page;
+	pages[1] = get_next_page(page);
+	BUG_ON(!pages[1]);
+
+	ret = __zs_map_object(area, pages, off, class->size);
+out:
+	if (likely(!ZsHugePage(zspage)))
+		ret += ZS_HANDLE_SIZE;
+
+	return ret;
+}
+EXPORT_SYMBOL_GPL(zs_map_object);
+
+void zs_unmap_object(struct zs_pool *pool, unsigned long handle)
+{
+	struct zspage *zspage;
+	struct page *page;
+	unsigned long obj, off;
+	unsigned int obj_idx;
+
+	struct size_class *class;
+	struct mapping_area *area;
+
+	obj = handle_to_obj(handle);
+	obj_to_location(obj, &page, &obj_idx);
+	zspage = get_zspage(page);
+	class = zspage_class(pool, zspage);
+	off = offset_in_page(class->size * obj_idx);
+
+	area = this_cpu_ptr(&zs_map_area);
+	if (off + class->size <= PAGE_SIZE)
+		kunmap_atomic(area->vm_addr);
+	else {
+		struct page *pages[2];
+
+		pages[0] = page;
+		pages[1] = get_next_page(page);
+		BUG_ON(!pages[1]);
+
+		__zs_unmap_object(area, pages, off, class->size);
+	}
+	local_unlock(&zs_map_area.lock);
+
+	zspage_read_unlock(zspage);
+}
+EXPORT_SYMBOL_GPL(zs_unmap_object);
+
 void *zs_obj_read_begin(struct zs_pool *pool, unsigned long handle,
 			void *local_copy)
 {
@@ -2227,11 +2427,26 @@ EXPORT_SYMBOL_GPL(zs_destroy_pool);
 
 static int __init zs_init(void)
 {
+	int ret;
+
+	/*
+	 * ANDROID / GKI KMI: the per-CPU mapping areas backing the
+	 * zs_map_object() compatibility shim need CPUHP_MM_ZS_PREPARE, which
+	 * is restored for the same reason. See the shim above.
+	 */
+	ret = cpuhp_setup_state(CPUHP_MM_ZS_PREPARE, "mm/zsmalloc:prepare",
+				zs_cpu_prepare, zs_cpu_dead);
+	if (ret)
+		goto out;
+
 #ifdef CONFIG_ZPOOL
 	zpool_register_driver(&zs_zpool_driver);
 #endif
 	zs_stat_init();
 	return 0;
+
+out:
+	return ret;
 }
 
 static void __exit zs_exit(void)
@@ -2239,6 +2454,8 @@ static void __exit zs_exit(void)
 #ifdef CONFIG_ZPOOL
 	zpool_unregister_driver(&zs_zpool_driver);
 #endif
+	cpuhp_remove_state(CPUHP_MM_ZS_PREPARE);
+
 	zs_stat_exit();
 }
 
