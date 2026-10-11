@@ -591,6 +591,67 @@ This governor exposes the following tunables:
 	times slower than it ramps up.
 
 
+``tachyon``
+-----------
+
+This governor uses CPU load as a CPU frequency selection metric, estimated in
+the same way as the `ondemand`_ governor described above, but it is tuned for
+fast response to short load spikes without wasting power on them.
+
+It keeps a smoothed baseline of the load (an exponentially weighted moving
+average) and compares each new sample against it to compute a trend.  When a
+rising trend crosses a threshold, the governor treats it as a predicted spike
+and ramps the frequency up in the same sample that detects it, rather than
+waiting for several samples to confirm.  The ramp is a two-stage one: the first
+spike sample ramps to a configurable fraction of the policy range, and the
+frequency is escalated to the ``scaling_max_freq`` policy limit only if the CPU
+is still saturated at the next sample.  This way a short spike never pays for
+the maximum frequency.
+
+Once a burst ends, the frequency decays geometrically (by a bounded percentage
+of the current frequency per sample) towards a proportional estimate of the
+demand, so the governor does not linger at a high frequency.  In the steady
+state it tracks the load proportionally with a configurable headroom.
+
+All of the governor's arithmetic is integer, and its sampling path does no
+memory allocation, so its decision overhead is small.
+
+This governor exposes the following tunables:
+
+``sampling_rate``
+	This is how often the governor's worker routine should run, in
+	microseconds.  Its default is the larger of the framework minimum and
+	10000 (10 ms).
+
+``up_threshold``
+	If the estimated CPU load is at or above this value (in percent,
+	default 90, range 50-100), the CPU is considered saturated at the
+	current frequency and the governor ramps up.
+
+``ramp_trend_threshold``
+	The rise of the estimated load above its recent baseline, in percentage
+	points (default 25, range 5-100), that counts as a spike and triggers a
+	first-stage ramp.
+
+``ramp_target_pct``
+	The first-stage ramp target, as a percentage of the policy's
+	``[scaling_min_freq, scaling_max_freq]`` range (default 80, range
+	1-100).  A ramp never lowers the frequency.
+
+``decay_step_pct``
+	The maximum downward step per sample when not boosting, as a percentage
+	of the current frequency (default 30, range 1-100).  The decay is
+	geometric, so it is a fraction of the current frequency rather than of
+	the policy range.
+
+``headroom_pct``
+	The margin added to the proportional demand estimate in the steady
+	state, in percent (default 25, range 0-100).
+
+The governor is named after Agnes Tachyon from *Uma Musume: Pretty Derby*; the
+name is design inspiration only.
+
+
 Frequency Boost Support
 =======================
 

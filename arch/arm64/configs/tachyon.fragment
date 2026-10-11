@@ -1,0 +1,18 @@
+# Tachyon cpufreq governor config fragment.
+#
+# Apply on top of gki_defconfig. gki_defconfig itself is left untouched;
+# schedutil stays the default governor and Tachyon is opt-in.
+#
+# Two variants, pick one:
+#
+#   Module (loadable cpufreq_tachyon.ko):
+#       CONFIG_CPU_FREQ_GOV_TACHYON=m
+#
+#   Inline (built into the kernel image):
+#       CONFIG_CPU_FREQ_GOV_TACHYON=y
+#
+# The common governor framework is auto-selected by the Kconfig entry.
+# Only one of the two lines below should be enabled at a time.
+
+CONFIG_CPU_FREQ_GOV_TACHYON=m
+# CONFIG_CPU_FREQ_GOV_TACHYON=y

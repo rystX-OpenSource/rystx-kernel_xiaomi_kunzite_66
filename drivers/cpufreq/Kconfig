@@ -112,6 +112,17 @@ config CPU_FREQ_DEFAULT_GOV_SCHEDUTIL
 	  have a look at the help section of that governor. The fallback
 	  governor will be 'performance'.
 
+config CPU_FREQ_DEFAULT_GOV_TACHYON
+	bool "tachyon"
+	depends on !(X86_INTEL_PSTATE && SMP)
+	select CPU_FREQ_GOV_TACHYON
+	select CPU_FREQ_GOV_PERFORMANCE
+	help
+	  Use the CPUFreq governor 'tachyon' as default. This predicts load
+	  spikes, ramps up quickly in the same sample that detects them, and
+	  decays quickly once a burst ends. Selecting it as the default forces
+	  it to be built in. Fallback governor will be the performance governor.
+
 endchoice
 
 config CPU_FREQ_GOV_PERFORMANCE
@@ -207,6 +218,29 @@ config CPU_FREQ_GOV_SCHEDUTIL
 	  case, it is proportional to the current frequency of the CPU.  The
 	  frequency tipping point is at utilization/capacity equal to 80% in
 	  both cases.
+
+	  If in doubt, say N.
+
+config CPU_FREQ_GOV_TACHYON
+	tristate "'tachyon' cpufreq governor"
+	depends on CPU_FREQ
+	select CPU_FREQ_GOV_COMMON
+	help
+	  'tachyon' - a dynamic cpufreq governor tuned for fast response to
+	  load spikes without wasting power. It keeps a smoothed baseline of
+	  the load and a trend, and when it detects a rising spike it ramps up
+	  in the same sample rather than waiting for confirmation. A two-stage
+	  ramp escalates to the maximum frequency only if the first ramp was
+	  not enough, and the frequency decays geometrically once a burst ends,
+	  so short spikes never pay for sustained maximum frequency. In the
+	  steady state it tracks load proportionally with a configurable
+	  headroom. All math is integer; the sampling path does no allocation.
+
+	  To compile this driver as a module, choose M here: the module will
+	  be called cpufreq_tachyon.
+
+	  For details, take a look at
+	  <file:Documentation/admin-guide/pm/cpufreq.rst>.
 
 	  If in doubt, say N.
 
